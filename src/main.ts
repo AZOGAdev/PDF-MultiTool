@@ -26,6 +26,7 @@ const logStore: string[] = [];
 
 // Флаг отмены текущего слияния. Устанавливается через ipc 'cancel-merge'.
 let mergeCancelRequested = false;
+let compressCancelRequested = false;
 
 /* Проверка, помечен ли файл как уже обработанный */
 const fileMarkedProcessed = (name: string) =>
@@ -512,13 +513,27 @@ ipcMain.handle('open-folder', async (_e, folderPath: string) => {
   try { await shell.openPath(folderPath); return true; } catch { return false; }
 });
 
+ipcMain.handle('cancel-compress', async () => {
+  compressCancelRequested = true;
+  return true;
+});
+
 ipcMain.handle('compress-pdfs', async (_e, { inputFolder, outputFolder, quality = 30 }: { inputFolder: string; outputFolder: string; quality?: number }) => {
-  const result: { processed: number; total: number; log: string[]; used?: string; files?: Array<{ name: string; inSize?: number; outSize?: number; ok: boolean; error?: string; notes?: string }> } = { processed: 0, total: 0, log: [], used: 'none', files: [] };
+  const result: {
+    processed: number;
+    total: number;
+    log: string[];
+    used?: string;
+    files?: Array<{ name: string; inSize?: number; outSize?: number; ok: boolean; error?: string; notes?: string }>;
+  } = { processed: 0, total: 0, log: [], used: 'none', files: [] };
 
   try {
     if (!inputFolder || !outputFolder) throw new Error('Не указаны папки inputFolder/outputFolder');
     if (!(await fs.pathExists(inputFolder))) throw new Error(`Input folder не найден: ${inputFolder}`);
     await fs.ensureDir(outputFolder);
+
+    // Сбрасываем флаг отмены перед стартом
+    compressCancelRequested = false;
 
     const all = await fsp.readdir(inputFolder);
     const pdfs = all.filter(f => f.toLowerCase().endsWith('.pdf'));
@@ -547,6 +562,15 @@ ipcMain.handle('compress-pdfs', async (_e, { inputFolder, outputFolder, quality 
     // цикл по файлам — после каждого файла отправляем событие прогресса
     let index = 0;
     for (const fname of pdfs) {
+      // Проверяем отмену в начале итерации
+      if (compressCancelRequested) {
+        const cancelMsg = 'Операция сжатия отменена пользователем';
+        result.log.push(cancelMsg);
+        // Сообщаем о завершении и выходим из цикла
+        mainWindow?.webContents.send('compress-complete', { processed: result.processed, total: result.total, log: result.log });
+        break;
+      }
+
       index++;
       const inP = path.join(inputFolder, fname);
       const outP = path.join(outputFolder, fname);
@@ -557,7 +581,7 @@ ipcMain.handle('compress-pdfs', async (_e, { inputFolder, outputFolder, quality 
       const tmpOut = path.join(os.tmpdir(), `out-${randomUUID()}.pdf`);
 
       try {
-        const statIn = await fsp.stat(inP).catch(() => ({ size: undefined }));
+        const statIn = await fsp.stat(inP).catch(() => ({ size: undefined as any }));
         fileInfo.inSize = statIn.size;
 
         if (gsCmd) {
@@ -591,72 +615,82 @@ ipcMain.handle('compress-pdfs', async (_e, { inputFolder, outputFolder, quality 
             fileInfo.notes = `GS:${pdfSetting}`;
             result.log.push(`GS: ${fname} -> ${outP} (${pdfSetting})`);
           } catch (gsErr) {
-            const gsErrMsg = (gsErr as Error).message || String(gsErr);
-            fileInfo.error = `GS error: ${gsErrMsg}`;
-            result.log.push(`GS error for ${fname}: ${gsErrMsg}`);
-            // очистка tmp перед fallback
-            try { if (await fs.pathExists(tmpIn)) await fsp.unlink(tmpIn); } catch {}
-            try { if (await fs.pathExists(tmpOut)) await fsp.unlink(tmpOut); } catch {}
-            // продолжим — будет выполнен fallback
+            fileInfo.ok = false;
+            fileInfo.error = (gsErr as Error).message;
+            result.log.push(`Ошибка Ghostscript для ${fname}: ${(gsErr as Error).message}`);
+          } finally {
+            // Чистим временные файлы
+            try { await fs.remove(tmpIn); } catch { /* ignore */ }
+            try { await fs.remove(tmpOut); } catch { /* ignore */ }
           }
-        }
-
-        if (!fileInfo.ok) {
-          // fallback через pdf-lib
+        } else {
+          // Fallback: pdf-lib (без реального влияния качества)
           try {
-            const buf = await fsp.readFile(inP);
-            const doc = await PDFDocument.load(buf);
-            const newBuf = await doc.save({ useObjectStreams: true });
-            await fsp.writeFile(outP, newBuf);
+            const inputBytes = await fsp.readFile(inP);
+            // Важно: импорт PDFDocument должен быть на уровне файла, здесь предполагается, что он уже доступен.
+            const pdfDoc = await PDFDocument.load(inputBytes);
+            const outBytes = await pdfDoc.save();
+            await fsp.writeFile(outP, outBytes);
+
             fileInfo.ok = true;
-            fileInfo.notes = 'pdf-lib fallback';
-            result.log.push(`Fallback: ${fname} -> ${outP}`);
+            fileInfo.notes = 'fallback';
+            result.log.push(`FB: ${fname} -> ${outP}`);
           } catch (fbErr) {
-            const em = `Fallback error ${fname}: ${(fbErr as Error).message}`;
-            fileInfo.error = em;
-            result.log.push(em);
+            fileInfo.ok = false;
+            fileInfo.error = (fbErr as Error).message;
+            result.log.push(`Ошибка fallback для ${fname}: ${(fbErr as Error).message}`);
           }
         }
 
-        const statOut = await fsp.stat(outP).catch(() => ({ size: undefined }));
+        const statOut = await fsp.stat(outP).catch(() => ({ size: undefined as any }));
         fileInfo.outSize = statOut.size;
-        if (fileInfo.inSize && fileInfo.outSize) {
-          const diff = (fileInfo.inSize || 0) - (fileInfo.outSize || 0);
-          const pct = fileInfo.inSize ? Math.round((diff / (fileInfo.inSize as number)) * 100) : 0;
-          result.log.push(`Размеры ${fname}: ${fileInfo.inSize} -> ${fileInfo.outSize} (${pct >= 0 ? '-' + pct + '%' : '+' + (-pct) + '%'})`);
-        }
 
+        result.files?.push(fileInfo);
         result.processed++;
-      } catch (err) {
-        const em = `Ошибка при обработке ${fname}: ${(err as Error).message}`;
-        fileInfo.error = em;
-        result.log.push(em);
-      } finally {
-        // очистка tmp-файлов текущей итерации
-        try { if (await fs.pathExists(tmpIn)) await fsp.unlink(tmpIn); } catch {}
-        try { if (await fs.pathExists(tmpOut)) await fsp.unlink(tmpOut); } catch {}
 
-        result.files!.push(fileInfo);
+        // Прогресс по файлу
+        mainWindow?.webContents.send('compress-progress', {
+          index,
+          total: result.total,
+          name: fname,
+          inSize: fileInfo.inSize,
+          outSize: fileInfo.outSize,
+          ok: fileInfo.ok,
+          error: fileInfo.error || null,
+          notes: fileInfo.notes || null
+        });
+      } catch (errFile) {
+        // Ошибка на уровне обработки файла
+        fileInfo.ok = false;
+        fileInfo.error = (errFile as Error).message;
+        result.log.push(`Ошибка обработки ${fname}: ${(errFile as Error).message}`);
 
-        // отправляем прогресс в renderer (mainWindow)
-        try {
-          mainWindow?.webContents.send('compress-progress', {
-            index,
-            total: result.total,
-            name: fileInfo.name,
-            inSize: fileInfo.inSize,
-            outSize: fileInfo.outSize,
-            ok: fileInfo.ok,
-            error: fileInfo.error || null,
-            notes: fileInfo.notes || null
-          });
-        } catch { /* ignore */ }
+        mainWindow?.webContents.send('compress-progress', {
+          index,
+          total: result.total,
+          name: fname,
+          inSize: fileInfo.inSize,
+          outSize: fileInfo.outSize,
+          ok: false,
+          error: fileInfo.error || null,
+          notes: fileInfo.notes || null
+        });
+      }
+
+      // Дополнительная проверка отмены в конце итерации
+      if (compressCancelRequested) {
+        const cancelMsg = 'Операция сжатия отменена пользователем';
+        result.log.push(cancelMsg);
+        mainWindow?.webContents.send('compress-complete', { processed: result.processed, total: result.total, log: result.log });
+        break;
       }
     }
 
-    // посылаем событие завершения (без создания CSV-отчёта)
-    mainWindow?.webContents.send('compress-complete', { processed: result.processed, total: result.total, log: result.log });
-    result.log.unshift(`Сжатие завершено. Engine: ${result.used}`);
+    // Если не отменили — финализируем как обычно
+    if (!compressCancelRequested) {
+      mainWindow?.webContents.send('compress-complete', { processed: result.processed, total: result.total, log: result.log });
+      result.log.unshift(`Сжатие завершено. Engine: ${result.used}`);
+    }
     return result;
   } catch (err) {
     const em = `Ошибка compress-pdfs: ${(err as Error).message}`;

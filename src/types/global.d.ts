@@ -29,6 +29,7 @@ declare global {
       compressPDFs: (options: { inputFolder: string; outputFolder: string; quality?: number }) => Promise<{ processed: number; total: number; log: string[]; used?: string }>;
       onCompressProgress: (cb: (event: any, payload: { index: number; total: number; name: string; inSize?: number; outSize?: number; ok: boolean; error?: string | null; notes?: string | null }) => void) => () => void;
       onCompressComplete: (cb: (event: any, payload: { processed: number; total: number; log: string[] }) => void) => () => void;
+      cancelCompress: () => Promise<boolean>;
       getAppInfo: () => Promise<{ version: string; platform: string; arch: string }>;
       openExternalUrl: (url: string) => Promise<void>;
       checkForUpdates: () => Promise<null>;

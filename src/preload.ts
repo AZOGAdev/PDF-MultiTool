@@ -20,6 +20,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Отменить текущее объединение (main ставит флаг cancel)
   cancelMerge: () => ipcRenderer.invoke('cancel-merge'),
+  cancelCompress: () => ipcRenderer.invoke('cancel-compress'),
 
   // Отправить в main информацию о текущей теме (sync theme main -> logWindow)
   setTheme: (isDark: boolean) => ipcRenderer.send('theme-changed', isDark),

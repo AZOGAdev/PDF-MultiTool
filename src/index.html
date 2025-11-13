@@ -737,9 +737,80 @@
         .app-popup.hidden {
         opacity: 0;
         pointer-events: none;
-        }
+        }      
+    </style>
+    <style id="compress-ui-extra">
+    .compress-progress-header { display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:8px; }
+    .compress-progress-meta { display:flex; align-items:center; gap:10px; font-size:12px; }
 
-        
+    /* БАЗА без цвета/фона — только форма и отступы */
+    .status-pill {
+        padding: 3px 10px;
+        border-radius: 999px;
+        line-height: 1.2;
+        white-space: nowrap;
+        border: 1px solid transparent;
+        transition: background-color .15s ease, color .15s ease, border-color .15s ease;
+    }
+
+    .compress-progress-bar { height:12px; background: var(--progress-bar-bg); border-radius:8px; overflow:hidden; position:relative; }
+    #compress-progress-fill { height:100%; width:0%; background: var(--progress-bar-fill); transition: width .25s ease; }
+
+    #compress-table-wrap { width:100%; overflow:auto; border:1px solid var(--sidebar-border); border-radius:8px; background: var(--bg-color, #fff); height:320px; max-height:70vh; }
+    #compress-table { width:100%; border-collapse:collapse; table-layout:fixed; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size:13px; min-width:760px; }
+    #compress-table thead th { position:sticky; top:0; background: var(--bg-color, #fff); z-index:1; border-bottom:1px solid var(--sidebar-border); padding:10px 12px; font-weight:600; text-align:left; }
+    #compress-table tbody td { padding:10px 12px; vertical-align:middle; border-bottom:1px solid rgba(0,0,0,0.05); }
+    #compress-table tbody tr:nth-child(odd) { background: rgba(0,0,0,0.02); }
+    #compress-table td:nth-child(1), #compress-table td:nth-child(3), #compress-table td:nth-child(4), #compress-table td:nth-child(5), #compress-table td:nth-child(6) { white-space: nowrap; }
+
+    #compress-controls .folder-group + .folder-group { margin-top:14px; }
+    .compress-progress-block { margin-top:14px; margin-bottom:14px; }
+    </style>
+    <style id="compress-theme-aware">
+    /* Светлая тема */
+    :root,
+    html[data-theme="light"],
+    body[data-theme="light"] {
+        --status-idle-bg: #e5e7eb;   --status-idle-fg: #111827;
+        --status-running-bg: #dbeafe;--status-running-fg: #1e3a8a;
+        --status-cancel-bg: #fef3c7; --status-cancel-fg: #92400e;
+        --status-done-bg: #dcfce7;   --status-done-fg: #065f46; /* текст темнее для контраста */
+        --progress-bar-fill-alt: rgba(255,255,255,0.55);
+    }
+
+    /* Тёмная тема — контраст: тёмный фон + светлый текст */
+    html[data-theme="dark"],
+    body[data-theme="dark"] {
+        --status-idle-bg: #4b5563;   --status-idle-fg: #e5e7eb;
+        --status-running-bg: #1e3a8a;--status-running-fg: #dbeafe;
+        --status-cancel-bg: #92400e; --status-cancel-fg: #fef3c7;
+        --status-done-bg: #065f46;   --status-done-fg: #d1fae5; /* светло-зелёный текст, фон тёмно-зелёный */
+        --progress-bar-fill-alt: rgba(0,0,0,0.35);
+    }
+
+    /* База без цветов */
+    .status-pill {
+        padding: 3px 10px;
+        border-radius: 999px;
+        white-space: nowrap;
+        line-height: 1.2;
+        border: 1px solid transparent;
+        font-weight: 500;
+        transition: background-color .15s ease, color .15s ease;
+    }
+
+    .status-pill.status--idle    { background: var(--status-idle-bg);    color: var(--status-idle-fg); }
+    .status-pill.status--running { background: var(--status-running-bg); color: var(--status-running-fg); }
+    .status-pill.status--cancel  { background: var(--status-cancel-bg);  color: var(--status-cancel-fg); }
+    .status-pill.status--done    { background: var(--status-done-bg);    color: var(--status-done-fg); }
+
+    #compress-progress-fill.is-cancel {
+        background-image: repeating-linear-gradient(
+        45deg,
+        var(--progress-bar-fill) 0 10px,
+        var(--progress-bar-fill-alt) 10px 20px
+        );
+    }
     </style>
 </head>
 <body>
@@ -981,36 +1052,44 @@
       </div>
     </div>
 
-    <div style="margin-top:12px;">
-      <div style="display:flex;align-items:center;gap:12px;">
-        <div style="flex:1; min-width:0;">
-          <div style="font-size:13px;margin-bottom:6px;">Прогресс сжатия</div>
-          <div style="height:10px;background:var(--progress-bar-bg);border-radius:6px;overflow:hidden;">
-            <div id="compress-progress-fill" style="height:100%; width:0%; background:var(--progress-bar-fill); transition:width .25s ease;"></div>
-          </div>
+    <div class="compress-progress-block">
+      <div class="compress-progress-header">
+        <div style="font-size:13px;">Прогресс сжатия</div>
+        <div class="compress-progress-meta">
+          <span id="compress-status-label" class="status-pill status--idle">Ожидание</span>
+          <span id="compress-progress-percent" style="min-width:32px; text-align:right; color:var(--text-color);">0%</span>
         </div>
       </div>
-
-      <div style="margin-top:12px;">
-        <div style="width:100%; overflow:auto;">
-          <table id="compress-table" style="width:100%; border-collapse:collapse; font-family:monospace; font-size:13px; min-width:700px;">
-            <thead>
-              <tr style="text-align:left; border-bottom:1px solid var(--sidebar-border);">
-                <th style="padding:6px 8px; width:40px;">#</th>
-                <th style="padding:6px 8px;">Файл</th>
-                <th style="padding:6px 8px; width:120px;">Исходный</th>
-                <th style="padding:6px 8px; width:120px;">Результат</th>
-                <th style="padding:6px 8px; width:90px;">Изм., %</th>
-                <th style="padding:6px 8px; width:140px;">Статус</th>
-              </tr>
-            </thead>
-            <tbody style="max-height:280px; display:block; overflow:auto; width:100%;"></tbody>
-          </table>
-        </div>
+      <div class="compress-progress-bar">
+        <div id="compress-progress-fill"></div>
       </div>
     </div>
 
-    <div class="controls-row" style="margin-top:12px;">
+    <div id="compress-table-wrap">
+      <table id="compress-table">
+        <colgroup>
+          <col style="width:56px" />
+          <col style="width:auto" />
+          <col style="width:120px" />
+          <col style="width:120px" />
+          <col style="width:90px" />
+          <col style="width:160px" />
+        </colgroup>
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Файл</th>
+            <th>Исходный</th>
+            <th>Результат</th>
+            <th>Изм., %</th>
+            <th>Статус</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+
+    <div class="controls-row" style="margin-top:14px;">
       <button id="btn-compress-run" class="btn btn-secondary" disabled>Начать сжатие</button>
     </div>
   </div>

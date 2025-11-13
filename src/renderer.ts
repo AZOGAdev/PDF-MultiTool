@@ -15,6 +15,8 @@ let lastSelectedCompress: string | null = null;
 let compressOutputFolder: string | null = null;
 let lastSelectedCompressOutputFolder: string | null = null;
 let lastReportPath: string | null = null;
+let isCompressRunning: boolean = false;
+let cancelCompressRequested: boolean = false;
 
 /* DOM элементы */
 const navMode1 = document.getElementById('nav-mode1') as HTMLButtonElement;
@@ -77,6 +79,8 @@ const labelCompress = document.getElementById('label-compress') as HTMLInputElem
 const labelCompressOutput = document.getElementById('label-compress-output') as HTMLInputElement | null;
 const selectCompressQuality = document.getElementById('compress-quality') as HTMLSelectElement | null;
 const compressProgressFill = document.getElementById('compress-progress-fill') as HTMLDivElement | null;
+const compressProgressPercent = document.getElementById('compress-progress-percent') as HTMLSpanElement | null;
+const compressStatusLabel = document.getElementById('compress-status-label') as HTMLSpanElement | null;
 const compressTableBody = document.querySelector('#compress-table tbody') as HTMLTableSectionElement | null;
 const btnOpenReport = document.getElementById('btn-open-report') as HTMLButtonElement | null;
 
@@ -105,39 +109,77 @@ const btnOpenReport = document.getElementById('btn-open-report') as HTMLButtonEl
   overlay.style.zIndex = '9999';
   overlay.innerHTML = `<div style="display:flex;flex-direction:column;align-items:center;gap:8px;">
     <div style="width:40px;height:40px;border:4px solid #ccc;border-top-color:#111;border-radius:50%;animation:spin 1s linear infinite;"></div>
-    <div>Выполняется...</div>
+    <div id="busy-label">Выполняется...</div>
     <div style="height:8px"></div>
-    <button id="btn-cancel-merge" class="btn btn-primary">Отменить</button>
+    <button id="btn-cancel-op" class="btn btn-primary">Отменить</button>
   </div>`;
   document.body.appendChild(overlay);
   const style = document.createElement('style');
   style.innerHTML = `@keyframes spin { to { transform: rotate(360deg); } }`;
   document.head.appendChild(style);
 
-  // Обработчик кнопки отмены: вызывает main через preload
-  overlay.querySelector('#btn-cancel-merge')?.addEventListener('click', async (e) => {
+  // Кнопка отмены: отменяет текущую операцию (merge или compress)
+  overlay.querySelector('#btn-cancel-op')?.addEventListener('click', async (e) => {
     const btn = e.currentTarget as HTMLButtonElement;
     btn.disabled = true;
     try {
-      await window.electronAPI.cancelMerge();
-      const ts = new Date().toLocaleTimeString();
-      const line = `[${ts}] [WARN] Запрошена отмена объединения`;
-      log(line, 'warning');
-      showPopup('Запрос отмены отправлен', 4000);
-    } catch (err) {
+      if (isCompressRunning) {
+        cancelCompressRequested = true;
+        // Визуально помечаем отмену
+        if (compressStatusLabel) compressStatusLabel.textContent = 'Отмена…';
+        if (compressStatusLabel) compressStatusLabel.style.background = '#facc15'; // желтый
+        if (compressProgressFill) {
+          // штриховка на фоне в режиме отмены
+          compressProgressFill.style.background = 'repeating-linear-gradient(45deg, var(--progress-bar-fill), var(--progress-bar-fill) 10px, rgba(255,255,255,0.65) 10px, rgba(255,255,255,0.65) 20px)';
+        }
+        const busyLabel = document.getElementById('busy-label');
+        if (busyLabel) busyLabel.textContent = 'Останавливается…';
+        await window.electronAPI.cancelCompress();
+        log('Запрошена отмена сжатия', 'warning');
+        showPopup('Запрос отмены сжатия отправлен', 4000);
+      } else {
+        await window.electronAPI.cancelMerge();
+        log('Запрошена отмена объединения', 'warning');
+        showPopup('Запрос отмены объединения отправлен', 4000);
+      }
+    } catch {
       showPopup('Ошибка отправки запроса отмены', 6000);
+    } finally {
+      setTimeout(() => { btn.disabled = false; }, 1500);
     }
   });
 })();
 
-// Очистка таблицы и прогресса перед новой обработкой
+function setCompressStatus(state: 'idle' | 'running' | 'cancel' | 'done', text: string) {
+  const el = document.getElementById('compress-status-label') as HTMLSpanElement | null;
+  if (!el) return;
+  // Удаляем возможные старые inline стили (на случай прежних версий)
+  el.removeAttribute('style');
+  el.classList.remove('status--idle','status--running','status--cancel','status--done');
+  el.classList.add(`status--${state}`);
+  el.textContent = text;
+
+  // Диагностика (можно временно оставить)
+  const themeAttr = document.documentElement.getAttribute('data-theme');
+  console.debug('[CompressStatus] state=', state, 'text=', text, 'data-theme=', themeAttr);
+}
+
+/* Очистка таблицы и прогресса перед новой обработкой */
 function clearCompressTable() {
   try {
     if (compressTableBody) {
       compressTableBody.innerHTML = '';
-      // гарантируем, что tbody остаётся display:block (см. стили)
     }
-    if (compressProgressFill) compressProgressFill.style.width = '0%';
+    if (compressProgressFill) {
+      compressProgressFill.style.width = '0%';
+      // вернуть обычный фон (если ранее была штриховка при отмене)
+      compressProgressFill.style.background = 'var(--progress-bar-fill)';
+    }
+    if (compressProgressPercent) compressProgressPercent.textContent = '0%';
+    if (compressStatusLabel) {
+      compressStatusLabel.textContent = 'Ожидание';
+      compressStatusLabel.style.background = 'var(--sidebar-border)';
+    }
   } catch (e) { console.error('clearCompressTable error', e); }
 }
 
@@ -206,7 +248,7 @@ function updateCompressReady() {
     }
   });
 
-  // Обработчик запуска сжатия — используем compressOutputFolder как выходную
+  /* Запуск сжатия */
   if (btnCompressRun) btnCompressRun.addEventListener('click', async () => {
     if (!labelCompress || !labelCompress.value || !compressOutputFolder) {
       showPopup('Выберите входную и выходную папки для сжатия', 5000);
@@ -214,18 +256,26 @@ function updateCompressReady() {
     }
     const quality = selectCompressQuality ? parseInt(selectCompressQuality.value, 10) : 30;
     log(`Запущено сжатие: ${labelCompress.value} -> ${compressOutputFolder}, качество ${quality}%`, 'info');
+
+    // Визуально отметим запуск
+    isCompressRunning = true;
+    cancelCompressRequested = false;
+    if (compressStatusLabel) { compressStatusLabel.textContent = 'Выполняется…'; compressStatusLabel.style.background = '#93c5fd'; } // голубой
+    const busyLabel = document.getElementById('busy-label');
+    if (busyLabel) busyLabel.textContent = 'Сжатие выполняется…';
+
     setBusy(true);
     try {
       clearCompressTable();
       const res = await window.electronAPI.compressPDFs({ inputFolder: labelCompress.value, outputFolder: compressOutputFolder, quality });
       if (res && Array.isArray(res.log)) res.log.forEach((m: string) => log(m, m.includes('Ошибка') ? 'error' : 'info'));
-      showPopup(`Сжатие завершено: обработано ${res.processed}/${res.total}`, 6000);
+      // showPopup здесь остается, но окончательное сообщение формируем в onCompressComplete
       updateStats();
     } catch (err) {
       log(`Ошибка при сжатии: ${(err as Error).message}`, 'error');
       showPopup('Ошибка при сжатии. Проверьте лог.', 8000);
     } finally {
-      setBusy(false);
+      // Разблокировка окончательно в onCompressComplete
     }
   });
 
@@ -265,6 +315,11 @@ window.electronAPI.onCompressProgress((_, payload) => {
         (cells[5] as HTMLTableCellElement).textContent = ok ? (notes || 'OK') : (error || 'ERROR');
       }
     }
+    if (compressProgressFill && typeof index === 'number' && typeof total === 'number' && total > 0) {
+      const percent = Math.max(0, Math.min(100, Math.round((index / total) * 100)));
+      compressProgressFill.style.width = `${percent}%`;
+      if (compressProgressPercent) compressProgressPercent.textContent = `${percent}%`;
+    }
   } catch (e) { console.error('compress-progress handler error', e); }
 });
 
@@ -272,20 +327,29 @@ window.electronAPI.onCompressProgress((_, payload) => {
 window.electronAPI.onCompressComplete((_, payload) => {
   try {
     const { processed, total, log } = payload as any;
-    if (compressProgressFill) compressProgressFill.style.width = '100%';
-    log && Array.isArray(log) && log.forEach((m: string) => logMessage(m));
-    showPopup(`Сжатие завершено: ${processed}/${total}`, 8000);
-    // таблица остаётся видимой, готова к следующей обработке (clearCompressTable() будет вызвана при старте следующей)
-  } catch (e) { console.error('compress-complete handler error', e); }
-});
+    const canceled = Array.isArray(log) && log.some((m: string) => /отмен[а|ено]/i.test(m));
 
-// Кнопка "Открыть отчёт" — открывает файл отчёта в системе
-if (btnOpenReport) btnOpenReport.addEventListener('click', async () => {
-  if (!lastReportPath) { showPopup('Отчёт не найден', 4000); return; }
-  try {
-    await window.electronAPI.openFolder(lastReportPath);
-  } catch (err) {
-    showPopup('Не удалось открыть отчёт', 4000);
+    if (compressProgressFill) {
+      compressProgressFill.style.width = '100%';
+      // вернуть обычный фон
+      compressProgressFill.style.background = 'var(--progress-bar-fill)';
+    }
+    if (compressProgressPercent) compressProgressPercent.textContent = '100%';
+
+    if (canceled) {
+      if (compressStatusLabel) { compressStatusLabel.textContent = 'Отменено'; compressStatusLabel.style.background = '#fca5a5'; } // красный
+      showPopup(`Сжатие отменено (${processed}/${total})`, 8000);
+    } else {
+      if (compressStatusLabel) { compressStatusLabel.textContent = 'Готово'; compressStatusLabel.style.background = '#86efac'; } // зеленый
+      showPopup(`Сжатие завершено: ${processed}/${total}`, 8000);
+    }
+
+    // Проброс лога в общий лог
+    log && Array.isArray(log) && log.forEach((m: string) => logMessage(m));
+  } finally {
+    isCompressRunning = false;
+    cancelCompressRequested = false;
+    setBusy(false);
   }
 });
 
