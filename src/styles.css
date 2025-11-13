@@ -556,20 +556,8 @@ video {
   display: none;
 }
 
-.collapse {
-  visibility: collapse;
-}
-
 .fixed {
   position: fixed;
-}
-
-.relative {
-  position: relative;
-}
-
-.sticky {
-  position: sticky;
 }
 
 .mb-1 {
@@ -602,6 +590,10 @@ video {
 
 .block {
   display: block;
+}
+
+.inline {
+  display: inline;
 }
 
 .flex {
@@ -642,10 +634,6 @@ video {
 
 .flex-shrink {
   flex-shrink: 1;
-}
-
-.border-collapse {
-  border-collapse: collapse;
 }
 
 .transform {
